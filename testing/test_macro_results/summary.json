@@ -1,0 +1,21 @@
+{
+  "total_cones": 8,
+  "total_blocks": 2,
+  "distribution": {
+    "by_depth": {
+      "0": 1,
+      "1": 7
+    },
+    "by_inputs": {
+      "1": 1,
+      "2": 7
+    },
+    "by_outputs": {
+      "1": 3,
+      "2": 5
+    },
+    "by_block": {
+      "0": 8
+    }
+  }
+}

@@ -5,13 +5,14 @@
 ## 目錄
 - [1. 程式整體架構](#1-程式整體架構)
 - [2. 資料結構設計](#2-資料結構設計)
-- [3. Verilog 解析模組](#3-verilog-解析模組)
-- [4. 圖建構與時序切割](#4-圖建構與時序切割)
-- [5. k-feasible Cuts 演算法](#5-k-feasible-cuts-演算法)
-- [6. 多輸出錐群組化](#6-多輸出錐群組化)
-- [7. 連通性與約束檢查](#7-連通性與約束檢查)
-- [8. 去重與簽名機制](#8-去重與簽名機制)
-- [9. 執行流程詳解](#9-執行流程詳解)
+- [3. CSV 元件庫系統](#3-csv-元件庫系統)
+- [4. Verilog 解析模組](#4-verilog-解析模組)
+- [5. 圖建構與時序切割](#5-圖建構與時序切割)
+- [6. k-feasible Cuts 演算法](#6-k-feasible-cuts-演算法)
+- [7. 多輸出錐群組化](#7-多輸出錐群組化)
+- [8. 連通性與約束檢查](#8-連通性與約束檢查)
+- [9. 去重與簽名機制](#9-去重與簽名機制)
+- [10. 執行流程詳解](#10-執行流程詳解)
 
 ---
 
@@ -29,21 +30,27 @@ graph TB
     A --> G[ConeEnumerator 類別]
     A --> H[ConeOutputWriter 類別]
     A --> I[main 函數]
+    A --> J[csv_cell_library.py]
+    J --> K[CSVCellLibrary 類別]
+    J --> L[MacroHandler 類別]
 ```
 
 ### 1.2 模組依賴關係
 
 ```
-VerilogParser ──解析──→ cells, nets, ports
-                           │
-                           ▼
-GraphBuilder ──建圖──→ nodes, blocks
-                           │
-                           ▼
-ConeEnumerator ──演算法──→ discovered_cones
-                           │
-                           ▼
-ConeOutputWriter ──輸出──→ JSONL, Summary
+CSV 檔案 ──載入──→ CSVCellLibrary ──元件分類──→ VerilogParser
+                                                     │
+                                                     ▼
+                                    cells, nets, ports + macro 檢測
+                                                     │
+                                                     ▼
+MacroHandler ──邊界處理──→ GraphBuilder ──建圖──→ nodes, blocks
+                                                     │
+                                                     ▼
+                           ConeEnumerator ──演算法──→ discovered_cones
+                                                     │
+                                                     ▼
+                           ConeOutputWriter ──輸出──→ JSONL, Summary
 ```
 
 ### 1.3 核心設計原則
@@ -52,6 +59,8 @@ ConeOutputWriter ──輸出──→ JSONL, Summary
 - **可擴展性**：支援不同 Verilog 格式和演算法變體
 - **可測試性**：清晰的輸入輸出界面
 - **效能平衡**：兼顧記憶體使用和執行速度
+- **機密性保護**：使用 CSV 檔案替代 Liberty 檔案，保護元件庫機密
+- **階層化支援**：將 Macro 視為邊界，支援複雜階層設計
 
 ---
 
@@ -141,20 +150,158 @@ class Cone:
 
 ---
 
-## 3. Verilog 解析模組
+## 3. CSV 元件庫系統
 
-### 3.1 VerilogParser 類別結構
+### 3.1 系統概述
+
+LogicConeMiner 採用 CSV 檔案定義標準元件，解決傳統 Liberty 檔案機密性問題。系統自動將非標準元件（Macro）視為邊界節點，實現階層化設計支援。
+
+### 3.2 CSVCellLibrary 類別
+
+```python
+class CSVCellLibrary:
+    def __init__(self, csv_file_path: str = None):
+        self.cells = {}               # 元件定義字典
+        self.builtin_definitions = {}  # 內建定義（降級用）
+        if csv_file_path:
+            self.load_from_csv(csv_file_path)
+        else:
+            self._load_builtin_definitions()
+```
+
+**CSV 檔案格式：**
+```csv
+cell_name,cell_type,input_pins,output_pins,is_sequential,clock_pin,data_pin
+AND2,combinational,"A,B",Y,false,,
+DFF,sequential,"D,CLK",Q,true,CLK,D
+INV,combinational,A,Y,false,,
+```
+
+### 3.3 MacroHandler 類別
+
+```python
+class MacroHandler:
+    def __init__(self, csv_library: CSVCellLibrary):
+        self.csv_library = csv_library
+        self.detected_macros = {}  # 記錄檢測到的 Macro
+
+    def is_macro(self, cell_type: str) -> bool:
+        """檢查元件是否為 Macro（非標準元件）"""
+        return not self.csv_library.has_cell(cell_type)
+
+    def handle_macro_boundaries(self, parser_data):
+        """將 Macro 輸入輸出處理為偽 PI/PO"""
+        for instance_name, cell_info in parser_data.cells.items():
+            if self.is_macro(cell_info['type']):
+                self._process_macro_instance(instance_name, cell_info)
+```
+
+### 3.4 Macro 邊界處理策略
+
+**處理原則：**
+```mermaid
+graph LR
+    A[標準邏輯] --> B[Macro 輸入]
+    B --> C[視為偽 PO]
+    D[Macro 輸出] --> E[標準邏輯]
+    D --> F[視為偽 PI]
+```
+
+**實作細節：**
+```python
+def _process_macro_instance(self, instance_name, cell_info):
+    macro_type = cell_info['type']
+
+    # 記錄 Macro 檢測
+    if macro_type not in self.detected_macros:
+        self.detected_macros[macro_type] = []
+    self.detected_macros[macro_type].append(instance_name)
+
+    # 輸入埠 → 偽 PO（前級邏輯終點）
+    for pin_name, net_name in cell_info['connections'].items():
+        if self._is_input_pin(pin_name):
+            # 切斷連接，將此網路視為邏輯錐輸出
+            pass
+
+    # 輸出埠 → 偽 PI（後級邏輯起點）
+    for pin_name, net_name in cell_info['connections'].items():
+        if self._is_output_pin(pin_name):
+            # 將此網路視為新的邏輯起點
+            pass
+```
+
+### 3.5 降級機制
+
+**多層次降級策略：**
+```python
+def get_cell_info(self, cell_type: str) -> dict:
+    # 1. 優先使用 CSV 定義
+    if cell_type in self.cells:
+        return self.cells[cell_type]
+
+    # 2. 降級為內建定義
+    if cell_type in self.builtin_definitions:
+        return self.builtin_definitions[cell_type]
+
+    # 3. 最終降級為啟發式規則
+    return self._heuristic_cell_info(cell_type)
+
+def _heuristic_cell_info(self, cell_type: str) -> dict:
+    """基於命名模式的啟發式推斷"""
+    cell_upper = cell_type.upper()
+
+    # 時序元件檢測
+    if any(seq in cell_upper for seq in ['DFF', 'DLAT', 'FF']):
+        return {
+            'type': 'sequential',
+            'input_pins': ['D', 'CLK'],
+            'output_pins': ['Q'],
+            'is_sequential': True
+        }
+
+    # 組合邏輯預設
+    return {
+        'type': 'combinational',
+        'input_pins': ['A', 'B'],  # 通用預設
+        'output_pins': ['Y'],
+        'is_sequential': False
+    }
+```
+
+### 3.6 機密性保護效益
+
+**相較於 Liberty 檔案：**
+- ✅ 無需提供完整的時序資訊（setup/hold time）
+- ✅ 無需提供功率模型
+- ✅ 無需提供精確的邏輯函數
+- ✅ 只需要基本的埠連接資訊
+
+**CSV 檔案範例：**
+```csv
+# 只提供必要的結構資訊
+NAND2,combinational,"A,B",Y,false,,
+NOR3,combinational,"A,B,C",Y,false,,
+AOI21,combinational,"A1,A2,B",Y,false,,
+```
+
+---
+
+## 4. Verilog 解析模組
+
+### 4.1 增強的 VerilogParser 類別
 
 ```python
 class VerilogParser:
-    def __init__(self):
+    def __init__(self, csv_library: CSVCellLibrary = None,
+                 macro_handler: MacroHandler = None):
         self.cells = {}          # 元件實例
         self.nets = {}           # 網路連接
         self.ports = {}          # 埠定義
-        self.seq_types = {...}   # 時序元件類型
+        self.csv_library = csv_library  # CSV 元件庫
+        self.macro_handler = macro_handler  # Macro 處理器
 ```
 
-### 3.2 解析流程
+### 4.2 整合式解析流程
 
 ```mermaid
 graph LR
@@ -162,25 +309,40 @@ graph LR
     B --> C[解析模組埠]
     C --> D[解析元件實例]
     D --> E[提取連接關係]
-    E --> F[識別時序元件]
+    E --> F[CSV 元件庫檢查]
+    F --> G[Macro 檢測與邊界處理]
+    G --> H[時序元件識別]
 ```
 
-### 3.3 時序元件識別
+### 4.3 智慧型元件識別
 
-**模式匹配策略：**
+**多層級檢測策略：**
 ```python
-seq_types = {
-    'DFF', 'DFFR', 'DFFS', 'DFFSR',    # D 觸發器變體
-    'SDFF', 'SDFFR',                    # 同步置位/重置
-    'DLAT', 'DLATR', 'DLATS'           # 閘鎖變體
-}
-
 def is_sequential(self, cell_type: str) -> bool:
+    # 1. 優先使用 CSV 元件庫定義
+    if self.csv_library and self.csv_library.has_cell(cell_type):
+        return self.csv_library.get_cell_info(cell_type)['is_sequential']
+
+    # 2. 降級為模式匹配
     cell_upper = cell_type.upper()
-    return any(seq_pattern in cell_upper for seq_pattern in self.seq_types)
+    seq_patterns = ['DFF', 'DFFR', 'DFFS', 'DFFSR', 'SDFF', 'SDFFR',
+                   'DLAT', 'DLATR', 'DLATS', 'FF', 'LAT']
+    return any(pattern in cell_upper for pattern in seq_patterns)
+
+def get_cell_pins(self, cell_type: str) -> dict:
+    # CSV 元件庫優先
+    if self.csv_library and self.csv_library.has_cell(cell_type):
+        return self.csv_library.get_cell_info(cell_type)
+
+    # Macro 檢測
+    if self.macro_handler and self.macro_handler.is_macro(cell_type):
+        return {'type': 'macro', 'treat_as_boundary': True}
+
+    # 啟發式推斷
+    return self._heuristic_pin_inference(cell_type)
 ```
 
-### 3.4 解析假設與限制
+### 4.4 解析假設與限制
 
 **支援的語法：**
 - 結構化模組實例：`cell_type instance_name (connections);`
@@ -194,9 +356,9 @@ def is_sequential(self, cell_type: str) -> bool:
 
 ---
 
-## 4. 圖建構與時序切割
+## 5. 圖建構與時序切割
 
-### 4.1 GraphBuilder 類別功能
+### 5.1 GraphBuilder 類別功能
 
 ```python
 class GraphBuilder:
@@ -206,7 +368,7 @@ class GraphBuilder:
         self.reverse_graph: Dict[str, Set[str]] = defaultdict(set)
 ```
 
-### 4.2 建圖流程
+### 5.2 建圖流程
 
 ```mermaid
 graph TD
@@ -219,7 +381,7 @@ graph TD
     G --> H[拓撲分層]
 ```
 
-### 4.3 時序切割策略
+### 5.3 時序切割策略
 
 **切割原則：**
 1. **FF/Latch 處理**：
@@ -251,7 +413,7 @@ def sequential_cut_and_blocks(self):
     self.blocks = self._find_connected_components(combinational_nodes, edges)
 ```
 
-### 4.4 拓撲分層
+### 5.4 拓撲分層
 
 **分層演算法：**
 ```python
@@ -285,13 +447,13 @@ def level_nodes_in_block(self, block: Set[str]):
 
 ---
 
-## 5. k-feasible Cuts 演算法
+## 6. k-feasible Cuts 演算法
 
-### 5.1 演算法概述
+### 6.1 演算法概述
 
 k-feasible cuts 演算法使用動態規劃來為每個節點計算所有可行的 cut，其中每個 cut 的葉節點數量不超過 k。
 
-### 5.2 動態規劃狀態
+### 6.2 動態規劃狀態
 
 **狀態定義：**
 - `Cuts[v]`：節點 v 的所有可行 cut 集合
@@ -315,7 +477,7 @@ else:
     Cuts[v] = limit_size(Cuts[v], max_cuts_per_node)
 ```
 
-### 5.3 Cut 合併演算法
+### 6.3 Cut 合併演算法
 
 ```python
 def merge_cuts(cut_combination):
@@ -334,7 +496,7 @@ def merge_cuts(cut_combination):
     return Cut(leaves=merged_leaves, depth=new_depth)
 ```
 
-### 5.4 支配裁剪
+### 6.4 支配裁剪
 
 **裁剪策略：**
 ```python
@@ -351,7 +513,7 @@ def prune_dominated_cuts(cuts: List[Cut]) -> List[Cut]:
     return pruned
 ```
 
-### 5.5 複雜度分析
+### 6.5 複雜度分析
 
 **時間複雜度：**
 - 每個節點：O(M^k) 其中 M 是 max_cuts_per_node，k 是 fanin 數量
@@ -368,9 +530,9 @@ def prune_dominated_cuts(cuts: List[Cut]) -> List[Cut]:
 
 ---
 
-## 6. 多輸出錐群組化
+## 7. 多輸出錐群組化
 
-### 6.1 支撐共享策略
+### 7.1 支撐共享策略
 
 多輸出錐使用支撐共享（support sharing）來避免組合爆炸：
 
@@ -383,7 +545,7 @@ graph LR
     E --> F[建構錐]
 ```
 
-### 6.2 支撐計算
+### 7.2 支撐計算
 
 ```python
 def _compute_support(self, root_id: str, block: Set[str]) -> Set[str]:
@@ -408,7 +570,7 @@ def _compute_support(self, root_id: str, block: Set[str]) -> Set[str]:
     return support
 ```
 
-### 6.3 群組擴展演算法
+### 7.3 群組擴展演算法
 
 ```python
 def _expand_to_groups(self, pairs, root_supports, max_size):
@@ -433,7 +595,7 @@ def _expand_to_groups(self, pairs, root_supports, max_size):
     return groups
 ```
 
-### 6.4 多根錐建構
+### 7.4 多根錐建構
 
 ```python
 def _build_multi_root_cone(self, block_id, roots, block):
@@ -461,9 +623,9 @@ def _build_multi_root_cone(self, block_id, roots, block):
 
 ---
 
-## 7. 連通性與約束檢查
+## 8. 連通性與約束檢查
 
-### 7.1 連通性檢查
+### 8.1 連通性檢查
 
 **演算法：BFS 無向圖遍歷**
 ```python
@@ -497,7 +659,7 @@ def _is_connected(self, nodes: Set[str]) -> bool:
     return len(visited) == len(nodes)
 ```
 
-### 7.2 深度計算
+### 8.2 深度計算
 
 **拓撲排序 + 動態規劃：**
 ```python
@@ -535,7 +697,7 @@ def _compute_longest_path(self, cone_nodes, leaves, roots):
     return max(distances[root_id] for root_id in roots if root_id in distances)
 ```
 
-### 7.3 約束驗證
+### 8.3 約束驗證
 
 **比較運算子支援：**
 ```python
@@ -564,9 +726,9 @@ def _satisfies_constraints(self, cone):
 
 ---
 
-## 8. 去重與簽名機制
+## 9. 去重與簽名機制
 
-### 8.1 簽名計算
+### 9.1 簽名計算
 
 **雜湊策略：**
 ```python
@@ -582,13 +744,13 @@ def _generate_signature(self, nodes: Set[str], roots: List[str]) -> str:
     return format(combined, '032x')
 ```
 
-### 8.2 等價性定義
+### 9.2 等價性定義
 
 **兩個錐等價當且僅當：**
 1. 節點集合完全相同：`cone1.nodes == cone2.nodes`
 2. 根集合完全相同：`set(cone1.roots) == set(cone2.roots)`
 
-### 8.3 碰撞處理
+### 9.3 碰撞處理
 
 ```python
 def _is_new_cone(self, cone: Cone) -> bool:
@@ -604,7 +766,7 @@ def _is_new_cone(self, cone: Cone) -> bool:
     return True
 ```
 
-### 8.4 簽名優勢
+### 9.4 簽名優勢
 
 **優點：**
 - 常數時間比較 O(1)
@@ -617,9 +779,9 @@ def _is_new_cone(self, cone: Cone) -> bool:
 
 ---
 
-## 9. 執行流程詳解
+## 10. 執行流程詳解
 
-### 9.1 主函數流程
+### 10.1 主函數流程
 
 ```python
 def main():
@@ -636,22 +798,35 @@ def main():
     }
 
     try:
-        # 3. Verilog 解析
-        verilog_parser = VerilogParser()
+        # 3. CSV 元件庫初始化
+        csv_library = None
+        macro_handler = None
+        if hasattr(args, 'cell_library') and args.cell_library:
+            csv_library = CSVCellLibrary(args.cell_library)
+            macro_handler = MacroHandler(csv_library)
+            print(f"從 {args.cell_library} 載入 {len(csv_library.cells)} 個標準元件定義")
+
+        # 4. Verilog 解析（整合 CSV 支援）
+        verilog_parser = VerilogParser(csv_library, macro_handler)
         verilog_parser.parse_file(args.netlist)
 
-        # 4. 圖建構
+        # 5. Macro 檢測報告
+        if macro_handler and macro_handler.detected_macros:
+            for macro_type, instances in macro_handler.detected_macros.items():
+                print(f"檢測到 Macro: {macro_type} (實例: {', '.join(instances)})")
+
+        # 6. 圖建構
         graph_builder = GraphBuilder(verilog_parser)
         graph_builder.build_graph()
         graph_builder.sequential_cut_and_blocks()
 
-        # 5. 錐枚舉
+        # 7. 錐枚舉
         enumerator = ConeEnumerator(graph_builder, config)
         for block_id, block in enumerate(graph_builder.blocks):
             enumerator.enumerate_single_root_cones(block_id, block)
             enumerator.enumerate_multi_root_cones(block_id, block)
 
-        # 6. 結果輸出
+        # 8. 結果輸出
         writer = ConeOutputWriter(args.out_dir)
         writer.write_cones_jsonl(enumerator.discovered_cones)
         writer.write_summary_json(enumerator.discovered_cones, graph_builder.blocks)
@@ -663,7 +838,7 @@ def main():
         return 1
 ```
 
-### 9.2 錯誤處理策略
+### 10.2 錯誤處理策略
 
 **階層式錯誤處理：**
 1. **解析錯誤**：檔案格式、語法問題
@@ -671,7 +846,7 @@ def main():
 3. **演算法錯誤**：記憶體不足、約束矛盾
 4. **輸出錯誤**：檔案權限、磁碟空間
 
-### 9.3 效能監控
+### 10.3 效能監控
 
 **記憶體使用：**
 - 監控 `max_cuts_per_node` 效果
@@ -683,7 +858,7 @@ def main():
 - 建圖時間 vs 節點數量
 - 枚舉時間 vs 區塊複雜度
 
-### 9.4 可擴展性考量
+### 10.4 可擴展性考量
 
 **水平擴展：**
 - 區塊並行處理
@@ -703,5 +878,20 @@ LogicConeMiner 實作了一個完整的邏輯錐探勘系統，主要特色包�
 2. **高效演算法**：k-feasible cuts + 支撐共享
 3. **robuseness**：完整的錯誤處理和約束檢查
 4. **可維護性**：詳細的文件和清晰的程式碼結構
+5. **機密性保護**：CSV 元件庫替代 Liberty 檔案，保護敏感資訊
+6. **階層化支援**：智慧型 Macro 檢測與邊界處理
+7. **向後相容**：多層級降級機制確保 robustness
 
-這個設計在功能完整性、效能和可維護性之間取得了良好的平衡，適合作為研究工具或商業應用的基礎。
+### 系統亮點
+
+**技術創新：**
+- 首創 CSV 元件庫系統，解決工業界機密性問題
+- 自動 Macro 檢測與邊界處理，支援複雜階層設計
+- 多層級降級機制，從 CSV → 內建 → 啟發式
+
+**實用價值：**
+- 保護元件庫機密資訊，適合商業環境
+- 支援混合標準元件與 Macro 的真實設計
+- 完整的測試驗證與文件說明
+
+這個設計在功能完整性、效能、可維護性和實用性之間取得了良好的平衡，特別適合需要處理機密元件庫的工業應用場景。

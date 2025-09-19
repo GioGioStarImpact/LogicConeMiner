@@ -1,0 +1,8 @@
+{"cone_id": "0000000000000000", "block_id": 0, "roots": ["u2.Y"], "leaves": ["u2.Y"], "depth": 0, "num_nodes": 1, "num_edges": 0, "connected": true, "signature": "00000000000000000000000000000000"}
+{"cone_id": "f1172aa4ea4dd556", "block_id": 0, "roots": ["u5.Y"], "leaves": ["u1.Y", "u2.Y"], "depth": 1, "num_nodes": 4, "num_edges": 4, "connected": true, "signature": "f1172aa4ea4dd5569b535d0c8e602f68"}
+{"cone_id": "f9ca45decd56b396", "block_id": 0, "roots": ["u3.Y"], "leaves": ["u1.Y", "u2.Y"], "depth": 1, "num_nodes": 4, "num_edges": 4, "connected": true, "signature": "f9ca45decd56b3963dff2cfc22b60ab3"}
+{"cone_id": "a9fc39017b906b93", "block_id": 0, "roots": ["u2.Y", "u5.Y"], "leaves": ["u1.Y", "u2.Y"], "depth": 1, "num_nodes": 3, "num_edges": 2, "connected": true, "signature": "a9fc39017b906b930442252de8896a4c"}
+{"cone_id": "6f4358637f5501f2", "block_id": 0, "roots": ["u2.Y", "u3.Y"], "leaves": ["u1.Y", "u2.Y"], "depth": 1, "num_nodes": 3, "num_edges": 2, "connected": true, "signature": "6f4358637f5501f20bd99aff97ceb5d0"}
+{"cone_id": "680fee3d50464ba4", "block_id": 0, "roots": ["u3.Y", "u5.Y"], "leaves": ["u1.Y", "u2.Y"], "depth": 1, "num_nodes": 4, "num_edges": 4, "connected": true, "signature": "680fee3d50464ba4310f56f433932d3c"}
+{"cone_id": "989259adde5796fd", "block_id": 0, "roots": ["u1.Y", "u5.Y"], "leaves": ["u1.Y", "u2.Y"], "depth": 1, "num_nodes": 3, "num_edges": 2, "connected": true, "signature": "989259adde5796fd4b1f5160c0dd553f"}
+{"cone_id": "65a20699bc7436d0", "block_id": 0, "roots": ["u1.Y", "u3.Y"], "leaves": ["u1.Y", "u2.Y"], "depth": 1, "num_nodes": 3, "num_edges": 2, "connected": true, "signature": "65a20699bc7436d0aa6de6978b84806b"}

@@ -30,4 +30,4 @@ results/
 *.temp
 
 # Claude specific
-.claude/
+.claude/__pycache__/
