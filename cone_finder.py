@@ -74,28 +74,29 @@ class Cone:
 class VerilogParser:
     """Enhanced Verilog parser with CSV cell library support"""
 
-    def __init__(self, cell_library_csv: str = None):
+    def __init__(self, csv_library: CSVCellLibrary = None):
         self.cells = {}      # cell_name -> (cell_type, connections)
         self.nets = {}       # net_name -> (driver, sinks)
         self.ports = {}      # port_name -> direction ("input"/"output")
+        self.csv_library = csv_library
+        self.macro_handler = MacroHandler(csv_library) if csv_library else None
+        self.macro_boundaries = {'inputs_as_po': [], 'outputs_as_pi': []}
 
-        # 使用 CSV 元件庫
-        self.cell_library = CSVCellLibrary(cell_library_csv)
-        self.macro_handler = MacroHandler(self.cell_library)
-
-        # 儲存 Macro 邊界節點
-        self.macro_boundaries = {
-            'inputs_as_po': [],   # Macro 輸入視為 PO
-            'outputs_as_pi': []   # Macro 輸出視為 PI
+        # 內建序列類型定義
+        self.seq_types = {
+            'DFF', 'DFFR', 'DFFS', 'DFFSR', 'SDFF', 'SDFFR',
+            'DLAT', 'DLATR', 'DLATS', 'DLATSR'
         }
 
     def is_sequential(self, cell_type: str) -> bool:
-        """Check if cell type is sequential using CSV library"""
-        return self.cell_library.is_sequential(cell_type)
+        """Check if cell type is sequential using CSV library first"""
+        # 1. 優先使用 CSV 元件庫定義
+        if self.csv_library and self.csv_library.is_standard_cell(cell_type):
+            return self.csv_library.is_sequential(cell_type)
 
-    def is_standard_cell(self, cell_type: str) -> bool:
-        """Check if cell type is a standard cell"""
-        return self.cell_library.is_standard_cell(cell_type)
+        # 2. 降級為模式匹配
+        cell_upper = cell_type.upper()
+        return any(seq_pattern in cell_upper for seq_pattern in self.seq_types)
 
     def parse_file(self, filename: str) -> None:
         """Parse Verilog file and extract structural information"""
@@ -145,19 +146,19 @@ class VerilogParser:
                 port, net = conn_match.groups()
                 connections[port] = net
 
-            # 檢查是否為標準元件
-            if self.is_standard_cell(cell_type):
-                # 標準元件：正常處理
-                self.cells[instance_name] = (cell_type, connections)
-            else:
-                # Macro：處理為邊界
-                boundaries = self.macro_handler.handle_macro_instance(
-                    instance_name, cell_type, connections
-                )
-                self.macro_boundaries['inputs_as_po'].extend(boundaries['inputs_as_po'])
-                self.macro_boundaries['outputs_as_pi'].extend(boundaries['outputs_as_pi'])
+            self.cells[instance_name] = (cell_type, connections)
 
-                logger.info(f"Macro {instance_name} ({cell_type}) 處理為邊界節點")
+        # 處理 Macro 邊界
+        if self.macro_handler:
+            for instance_name, (cell_type, connections) in self.cells.items():
+                if self.macro_handler.is_macro(cell_type):
+                    boundaries = self.macro_handler.handle_macro_instance(
+                        instance_name, cell_type, connections
+                    )
+                    self.macro_boundaries['inputs_as_po'].extend(boundaries['inputs_as_po'])
+                    self.macro_boundaries['outputs_as_pi'].extend(boundaries['outputs_as_pi'])
+
+                    logger.info(f"Macro {instance_name} ({cell_type}) 處理為邊界節點")
 
         logger.info(f"解析完成: {len(self.cells)} 個元件, {len(self.ports)} 個埠")
 
@@ -184,40 +185,14 @@ class GraphBuilder:
             )
             self.nodes[port_name] = node
 
-        # Create nodes for Macro boundaries first
+        # Create nodes for cell outputs and constants
         net_drivers: Dict[str, str] = {}  # net -> driver_node
 
-        # 處理 Macro 邊界節點
-        for boundary in self.parser.macro_boundaries['outputs_as_pi']:
-            # Macro 輸出作為 PI
-            node = Node(
-                id=boundary['node_id'],
-                type=boundary['type'],
-                is_pi=True
-            )
-            self.nodes[boundary['node_id']] = node
-            net_drivers[boundary['net']] = boundary['node_id']
-
-        for boundary in self.parser.macro_boundaries['inputs_as_po']:
-            # Macro 輸入作為 PO
-            node = Node(
-                id=boundary['node_id'],
-                type=boundary['type'],
-                is_po=True
-            )
-            self.nodes[boundary['node_id']] = node
-
-        # Create nodes for standard cell outputs
         for instance_name, (cell_type, connections) in self.parser.cells.items():
             # For sequential elements, create separate nodes for Q and D
             if self.parser.is_sequential(cell_type):
-                # 取得元件定義中的時鐘和資料埠
-                cell_def = self.parser.cell_library.get_cell_definition(cell_type)
-                q_pin = cell_def.output_pins[0] if cell_def and cell_def.output_pins else 'Q'
-                d_pin = cell_def.data_pin if cell_def and cell_def.data_pin else 'D'
-
                 # Q output node
-                q_node_id = f"{instance_name}.{q_pin}"
+                q_node_id = f"{instance_name}.Q"
                 q_node = Node(
                     id=q_node_id,
                     type=cell_type,
@@ -226,7 +201,7 @@ class GraphBuilder:
                 self.nodes[q_node_id] = q_node
 
                 # D input node (pseudo-output)
-                d_node_id = f"{instance_name}.{d_pin}"
+                d_node_id = f"{instance_name}.D"
                 d_node = Node(
                     id=d_node_id,
                     type=f"{cell_type}_D",
@@ -235,45 +210,30 @@ class GraphBuilder:
                 self.nodes[d_node_id] = d_node
 
                 # Connect to nets
-                if q_pin in connections:
-                    net_drivers[connections[q_pin]] = q_node_id
+                if 'Q' in connections:
+                    net_drivers[connections['Q']] = q_node_id
 
             else:
-                # Regular combinational cell - use CSV library info
-                cell_def = self.parser.cell_library.get_cell_definition(cell_type)
-                if cell_def and cell_def.output_pins:
-                    # 使用 CSV 定義的輸出埠
-                    for output_pin in cell_def.output_pins:
-                        if output_pin in connections:
-                            node_id = f"{instance_name}.{output_pin}"
-                            node = Node(
-                                id=node_id,
-                                type=cell_type
-                            )
-                            self.nodes[node_id] = node
-                            net_drivers[connections[output_pin]] = node_id
-                            break
-                else:
-                    # 降級為原有邏輯
-                    output_ports = ['Y', 'Z', 'Q', 'OUT']
-                    for port in output_ports:
-                        if port in connections:
-                            node_id = f"{instance_name}.{port}"
-                            node = Node(
-                                id=node_id,
-                                type=cell_type
-                            )
-                            self.nodes[node_id] = node
-                            net_drivers[connections[port]] = node_id
-                            break
-                    else:
-                        # 如果還是找不到，建立 generic node
-                        node_id = instance_name
+                # Regular combinational cell - create node for output
+                output_ports = ['Y', 'Z', 'Q', 'OUT']  # Common output port names
+                for port in output_ports:
+                    if port in connections:
+                        node_id = f"{instance_name}.{port}"
                         node = Node(
                             id=node_id,
                             type=cell_type
                         )
                         self.nodes[node_id] = node
+                        net_drivers[connections[port]] = node_id
+                        break
+                else:
+                    # If no standard output port found, create generic node
+                    node_id = instance_name
+                    node = Node(
+                        id=node_id,
+                        type=cell_type
+                    )
+                    self.nodes[node_id] = node
 
         # Build connections
         for instance_name, (cell_type, connections) in self.parser.cells.items():
@@ -300,22 +260,15 @@ class GraphBuilder:
                     cell_output_node = instance_name
 
                 if cell_output_node in self.nodes:
-                    # Connect inputs using CSV library info
-                    cell_def = self.parser.cell_library.get_cell_definition(cell_type)
-                    if cell_def and cell_def.input_pins:
-                        # 使用 CSV 定義的輸入埠
-                        input_ports = set(cell_def.input_pins)
-                    else:
-                        # 降級為原有邏輯
-                        input_ports = {'A', 'B', 'C', 'D', 'IN', 'I'}
-
+                    # Connect inputs
+                    input_ports = ['A', 'B', 'C', 'D', 'IN', 'I']
                     for port, net in connections.items():
                         if port in input_ports or port.startswith('I'):
                             if net in net_drivers:
                                 driver = net_drivers[net]
                                 self.nodes[driver].fanout.append(cell_output_node)
                                 self.nodes[cell_output_node].fanin.append(driver)
-                            elif net in self.nodes:  # Primary input or Macro boundary
+                            elif net in self.nodes:  # Primary input
                                 self.nodes[net].fanout.append(cell_output_node)
                                 self.nodes[cell_output_node].fanin.append(net)
 
@@ -901,10 +854,8 @@ def main():
     parser.add_argument('--n_out', type=int, required=True, help='Maximum number of cone outputs')
     parser.add_argument('--n_depth', type=int, required=True, help='Maximum cone depth')
 
-    # Cell library parameter
-    parser.add_argument('--cell_library', help='CSV file defining standard cells (optional)')
-
     # Optional parameters
+    parser.add_argument('--cell_library', help='CSV cell library file (optional)')
     parser.add_argument('--cmp_in', choices=['<=', '=='], default='<=', help='Input comparison operator')
     parser.add_argument('--cmp_out', choices=['<=', '=='], default='<=', help='Output comparison operator')
     parser.add_argument('--cmp_depth', choices=['<=', '=='], default='<=', help='Depth comparison operator')
@@ -927,9 +878,24 @@ def main():
     }
 
     try:
-        # Parse Verilog with CSV cell library
-        verilog_parser = VerilogParser(args.cell_library)
+        # 初始化 CSV 元件庫
+        csv_library = None
+        if args.cell_library:
+            csv_library = CSVCellLibrary(args.cell_library)
+            logger.info(f"從 {args.cell_library} 載入 {len(csv_library.cells)} 個標準元件定義")
+        else:
+            csv_library = CSVCellLibrary()  # 使用內建定義
+            logger.info(f"載入 {len(csv_library.cells)} 個內建標準元件定義")
+
+        # Parse Verilog with CSV library
+        verilog_parser = VerilogParser(csv_library)
         verilog_parser.parse_file(args.netlist)
+
+        # 顯示 Macro 檢測結果
+        if verilog_parser.macro_handler:
+            detected_macros = verilog_parser.macro_handler.get_detected_macros()
+            for macro_type in detected_macros:
+                logger.info(f"檢測到 Macro: {macro_type}")
 
         # Build graph
         graph_builder = GraphBuilder(verilog_parser)
