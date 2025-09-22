@@ -250,7 +250,7 @@ def _heuristic_cell_info(self, cell_type: str) -> dict:
     """基於命名模式的啟發式推斷"""
     cell_upper = cell_type.upper()
 
-    # 時序元件檢測
+    # 時序元件檢測（應由 CSV 元件庫定義，此處僅為範例）
     if any(seq in cell_upper for seq in ['DFF', 'DLAT', 'FF']):
         return {
             'type': 'sequential',
@@ -323,8 +323,10 @@ def is_sequential(self, cell_type: str) -> bool:
     if self.csv_library and self.csv_library.has_cell(cell_type):
         return self.csv_library.get_cell_info(cell_type)['is_sequential']
 
-    # 2. 降級為模式匹配
+    # 2. 降級為模式匹配（不推薦，應使用 CSV 元件庫定義）
     cell_upper = cell_type.upper()
+    # 注意：在實際實作中，這些硬編碼列表已被移除，
+    # 改為完全依賴 CSV 元件庫定義
     seq_patterns = ['DFF', 'DFFR', 'DFFS', 'DFFSR', 'SDFF', 'SDFFR',
                    'DLAT', 'DLATR', 'DLATS', 'FF', 'LAT']
     return any(pattern in cell_upper for pattern in seq_patterns)

@@ -92,11 +92,6 @@ class VerilogParser:
         self.csv_library = csv_library
         self.macro_handler = MacroHandler(csv_library) if csv_library else None
 
-        # 內建序列類型定義（用於降級）
-        self.seq_types = {
-            'DFF', 'DFFR', 'DFFS', 'DFFSR', 'SDFF', 'SDFFR',
-            'DLAT', 'DLATR', 'DLATS', 'DLATSR'
-        }
 
     def is_sequential(self, cell_type: str) -> bool:
         """Check if cell type is sequential using CSV library"""
