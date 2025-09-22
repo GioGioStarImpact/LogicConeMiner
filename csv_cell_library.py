@@ -23,14 +23,16 @@ class CellDefinition:
 class CSVCellLibrary:
     """CSV 標準元件庫解析器"""
 
-    def __init__(self, csv_file: str = None):
+    def __init__(self, csv_file: str):
         self.cells: Dict[str, CellDefinition] = {}
 
-        if csv_file and os.path.exists(csv_file):
-            self.load_from_csv(csv_file)
-        else:
-            # 如果沒有 CSV 檔案，載入內建的基本定義
-            self._load_builtin_definitions()
+        if not csv_file:
+            raise ValueError("必須提供 CSV 元件庫檔案")
+
+        if not os.path.exists(csv_file):
+            raise FileNotFoundError(f"找不到 CSV 元件庫檔案: {csv_file}")
+
+        self.load_from_csv(csv_file)
 
     def load_from_csv(self, csv_file: str) -> None:
         """從 CSV 檔案載入元件定義"""
@@ -70,32 +72,8 @@ class CSVCellLibrary:
             print(f"從 {csv_file} 載入 {len(self.cells)} 個標準元件定義")
 
         except Exception as e:
-            print(f"載入 CSV 檔案失敗: {e}")
-            print("使用內建的基本元件定義")
-            self._load_builtin_definitions()
+            raise RuntimeError(f"載入 CSV 檔案失敗: {e}")
 
-    def _load_builtin_definitions(self) -> None:
-        """載入內建的基本元件定義（降級方案）"""
-        builtin_cells = [
-            # 基本組合邏輯閘
-            CellDefinition("AND2", "combinational", ["A", "B"], ["Y"], False),
-            CellDefinition("OR2", "combinational", ["A", "B"], ["Y"], False),
-            CellDefinition("NAND2", "combinational", ["A", "B"], ["Y"], False),
-            CellDefinition("NOR2", "combinational", ["A", "B"], ["Y"], False),
-            CellDefinition("XOR2", "combinational", ["A", "B"], ["Y"], False),
-            CellDefinition("NOT", "combinational", ["A"], ["Y"], False),
-            CellDefinition("BUF", "combinational", ["A"], ["Y"], False),
-
-            # 時序元件
-            CellDefinition("DFF", "sequential", ["D", "CLK"], ["Q"], True, "CLK", "D"),
-            CellDefinition("DFFR", "sequential", ["D", "CLK", "R"], ["Q"], True, "CLK", "D"),
-            CellDefinition("DLAT", "sequential", ["D", "E"], ["Q"], True, "E", "D"),
-        ]
-
-        for cell in builtin_cells:
-            self.cells[cell.name] = cell
-
-        print(f"載入 {len(self.cells)} 個內建標準元件定義")
 
     def is_standard_cell(self, cell_name: str) -> bool:
         """檢查是否為標準元件"""
