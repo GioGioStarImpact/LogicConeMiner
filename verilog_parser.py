@@ -17,11 +17,22 @@ logger = logging.getLogger(__name__)
 class VerilogParser:
     """Enhanced Verilog parser with multi-module and CSV cell library support"""
 
+    # Verilog identifier pattern: supports both regular (word characters + $) and escaped identifiers
+    # Escaped identifiers: backslash followed by non-backslash chars until mandatory space
+    IDENTIFIER_PATTERN = r'(?:\\[^\\]+\s|[\w$]+)'
+
     def __init__(self, csv_library: CSVCellLibrary = None):
         self.modules: Dict[str, ModuleDefinition] = {}  # module_name -> ModuleDefinition
         self.macro_definitions: Dict[str, ModuleDefinition] = {}  # macro_name -> ModuleDefinition
         self.csv_library = csv_library
         self.black_box_modules: Set[str] = set()  # Undefined modules (black box)
+
+    def _normalize_identifier(self, identifier: str) -> str:
+        """Normalize escaped identifier by removing leading backslash and trailing whitespace"""
+        if identifier.startswith('\\'):
+            # Remove leading \ and trailing whitespace
+            return identifier[1:].rstrip()
+        return identifier
 
     def is_sequential(self, cell_type: str) -> bool:
         """Check if cell type is sequential using CSV library"""
@@ -111,9 +122,10 @@ class VerilogParser:
         content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
 
         # Extract all modules
-        module_pattern = r'module\s+(\w+)\s*\((.*?)\);(.*?)endmodule'
+        module_pattern = rf'module\s+({self.IDENTIFIER_PATTERN})\s*\((.*?)\);(.*?)endmodule'
         for match in re.finditer(module_pattern, content, re.DOTALL):
             module_name, ports_str, module_body = match.groups()
+            module_name = self._normalize_identifier(module_name)
 
             logger.info(f"Parsing module: {module_name}")
             module_def = self._parse_module(module_name, ports_str, module_body)
@@ -163,34 +175,32 @@ class VerilogParser:
         # Handle: module name(input clk, input [7:0] data, output result);
 
         # Input ports from port list
-        input_pattern = r'input\s+(?:\[[^\]]+\]\s*)?(\w+)'
+        input_pattern = rf'input\s+(?:\[[^\]]+\]\s*)?({self.IDENTIFIER_PATTERN})'
         for match in re.finditer(input_pattern, ports_str):
-            port_name = match.group(1)
+            port_name = self._normalize_identifier(match.group(1))
             module_def.input_ports.append(port_name)
 
         # Output ports from port list
-        output_pattern = r'output\s+(?:\[[^\]]+\]\s*)?(\w+)'
+        output_pattern = rf'output\s+(?:\[[^\]]+\]\s*)?({self.IDENTIFIER_PATTERN})'
         for match in re.finditer(output_pattern, ports_str):
-            port_name = match.group(1)
+            port_name = self._normalize_identifier(match.group(1))
             module_def.output_ports.append(port_name)
 
     def _parse_ports_from_module_body(self, module_def: ModuleDefinition, module_body: str) -> None:
         """Parse ports from module body declarations"""
-        # Handle: input [7:0] data; output result;
+        # Handle: input [7:0] data; output result; input \escaped name ;
 
-        # Input ports from module body
-        input_pattern = r'input\s+([^;]+);'
+        # Input ports from module body - support both with and without width
+        input_pattern = rf'input\s+(?:\[[^\]]+\]\s*)?({self.IDENTIFIER_PATTERN})\s*;'
         for match in re.finditer(input_pattern, module_body):
-            ports_spec = match.group(1)
-            port_names = self._extract_port_names(ports_spec)
-            module_def.input_ports.extend(port_names)
+            port_name = self._normalize_identifier(match.group(1))
+            module_def.input_ports.append(port_name)
 
-        # Output ports from module body
-        output_pattern = r'output\s+([^;]+);'
+        # Output ports from module body - support both with and without width
+        output_pattern = rf'output\s+(?:\[[^\]]+\]\s*)?({self.IDENTIFIER_PATTERN})\s*;'
         for match in re.finditer(output_pattern, module_body):
-            ports_spec = match.group(1)
-            port_names = self._extract_port_names(ports_spec)
-            module_def.output_ports.extend(port_names)
+            port_name = self._normalize_identifier(match.group(1))
+            module_def.output_ports.append(port_name)
 
     def _extract_port_names(self, ports_spec: str) -> List[str]:
         """Extract port names from declaration, handling bus notation"""
@@ -204,19 +214,19 @@ class VerilogParser:
             if '[' in port_spec:
                 if port_spec.startswith('['):
                     # Format: [7:0] data_bus
-                    bus_name = re.search(r'\]\s*(\w+)', port_spec)
+                    bus_name = re.search(rf'\]\s*({self.IDENTIFIER_PATTERN})', port_spec)
                     if bus_name:
-                        port_names.append(bus_name.group(1))
+                        port_names.append(self._normalize_identifier(bus_name.group(1)))
                 else:
                     # Format: data_bus[7:0] (old style)
-                    base_name = re.search(r'(\w+)\s*\[', port_spec)
+                    base_name = re.search(rf'({self.IDENTIFIER_PATTERN})\s*\[', port_spec)
                     if base_name:
-                        port_names.append(base_name.group(1))
+                        port_names.append(self._normalize_identifier(base_name.group(1)))
             else:
                 # Simple port name
-                wire_name = re.search(r'(\w+)', port_spec)
+                wire_name = re.search(rf'({self.IDENTIFIER_PATTERN})', port_spec)
                 if wire_name:
-                    port_names.append(wire_name.group(1))
+                    port_names.append(self._normalize_identifier(wire_name.group(1)))
 
         return port_names
 
@@ -224,10 +234,13 @@ class VerilogParser:
     def _parse_cell_instances(self, module_def: ModuleDefinition, module_body: str) -> None:
         """Parse cell instances"""
         # Pattern: cell_type instance_name ( connections );
-        instance_pattern = r'(\w+)\s+(\w+)\s*\((.*?)\)\s*;'
+        # Note: for escaped identifiers, spaces are already included, so use \s* instead of \s+
+        instance_pattern = rf'({self.IDENTIFIER_PATTERN})\s*({self.IDENTIFIER_PATTERN})\s*\((.*?)\)\s*;'
 
         for match in re.finditer(instance_pattern, module_body, re.DOTALL):
             cell_type, instance_name, connections_str = match.groups()
+            cell_type = self._normalize_identifier(cell_type)
+            instance_name = self._normalize_identifier(instance_name)
 
             # Skip module/endmodule keywords
             if cell_type in ['module', 'endmodule']:
@@ -235,10 +248,11 @@ class VerilogParser:
 
             # Parse connections (.port(net), ...)
             connections = {}
-            conn_pattern = r'\.(\w+)\s*\(\s*([^)]+)\s*\)'
+            conn_pattern = rf'\.({self.IDENTIFIER_PATTERN})\s*\(\s*([^)]+)\s*\)'
 
             for conn_match in re.finditer(conn_pattern, connections_str):
                 port, net = conn_match.groups()
+                port = self._normalize_identifier(port)
                 connections[port] = net.strip()
 
             module_def.cells[instance_name] = (cell_type, connections)
@@ -255,7 +269,7 @@ class VerilogParser:
 
         non_standard_cells = 0
         for _, (cell_type, _) in module_def.cells.items():
-            if not self.csv_library.is_standard_cell(cell_type):
+            if not self.csv_library or not self.csv_library.is_standard_cell(cell_type):
                 non_standard_cells += 1
 
         # If all are non-standard components, treat as Macro
